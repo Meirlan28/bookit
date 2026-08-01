@@ -1,27 +1,32 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from uuid import uuid4
 
+import bcrypt
 import jwt
-from passlib.context import CryptContext
 
-from alembic.environment import Any
 from src.bookit.auth.config import auth_settings
-from src.bookit.auth.constants import TOKEN_TYPE_ACCESS, TOKEN_TYPE_REFRESH
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    password_byte_enc = plain_password.encode("utf-8")
+    hashed_password_bytes = hashed_password.encode("utf-8")
+    return bcrypt.checkpw(
+        password=password_byte_enc, hashed_password=hashed_password_bytes
+    )
 
 
 def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+    pwd_bytes = password.encode("utf-8")
+    salt = bcrypt.gensalt()
+    hashed_password = bcrypt.hashpw(password=pwd_bytes, salt=salt)
+    return hashed_password.decode("utf-8")
 
 
 def create_jwt_token(data: dict, token_type: str, expires_delta: timedelta) -> str:
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + expires_delta
-    to_encode.update({"exp": expire, "type": token_type})
+    expire = datetime.now(UTC) + expires_delta
+    to_encode.update({"exp": expire, "type": token_type, "jti": uuid4().hex})
     return jwt.encode(
         to_encode, auth_settings.SECRET_KEY, algorithm=auth_settings.ALGORITHM
     )

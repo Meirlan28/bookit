@@ -1,12 +1,11 @@
-from fastapi import APIRouter, BackgroundTasks, Cookie, Depends, Response, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, BackgroundTasks, Cookie, Request, Response, status
 
-from bookit.auth.exceptions import InvalidRefreshTokenException
 from src.bookit.auth.config import auth_settings
 from src.bookit.auth.constants import REFRESH_COOKIE_NAME, TOKEN_TYPE_BEARER
-from src.bookit.auth.schemas import TokenResponse, UserCreate, UserResponse
-from src.bookit.auth.service import AuthService
-from src.bookit.database import get_async_session
+from src.bookit.auth.dependencies import AuthServiceDep, OAuth2PasswordRequestFormDep
+from src.bookit.auth.exceptions import InvalidRefreshTokenException
+from src.bookit.auth.schemas import TokenResponse, UserCreate, UserLogin, UserResponse
+from src.bookit.limiter import limiter
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -14,41 +13,54 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 @router.post(
     "/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED
 )
+@limiter.limit("3/hour")
 async def register(
-    user_data: UserCreate, db: AsyncSession = Depends(get_async_session)
+    auth_service: AuthServiceDep,
+    request: Request,
+    user_data: UserCreate,
 ):
-    return await AuthService.register_new_user(user_data, db)
+    return await auth_service.register_new_user(user_data)
 
 
 @router.post("/login", response_model=TokenResponse)
+@limiter.limit("5/minute")
 async def login(
+    auth_service: AuthServiceDep,
+    request: Request,
     response: Response,
-    user_data: UserCreate,
+    form_data: OAuth2PasswordRequestFormDep,
     background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_async_session),
 ):
-    # 1. Авторизуем пользователя
-    access_token, refresh_token = await AuthService.authenticate_user(user_data, db)
+    user_data = UserLogin(email=form_data.username, password=form_data.password)
 
-    # 2. Добавляем задачу по очистке старых токенов в фон
-    background_tasks.add_task(AuthService.cleanup_expired_tokens, db)
+    access_token, refresh_token = await auth_service.authenticate_user(user_data)
 
-    # 3. Устанавливаем куку
-    response.set_cookie(...)
+    background_tasks.add_task(auth_service.cleanup_expired_tokens)
+
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=refresh_token,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        max_age=auth_settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+    )
 
     return TokenResponse(access_token=access_token, token_type=TOKEN_TYPE_BEARER)
 
 
 @router.post("/refresh", response_model=TokenResponse)
+@limiter.limit("10/minute")
 async def refresh_token(
+    auth_service: AuthServiceDep,
+    request: Request,
     response: Response,
-    db: AsyncSession = Depends(get_async_session),
     refresh_token: str | None = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
 ):
     if not refresh_token:
         raise InvalidRefreshTokenException()
 
-    new_access, new_refresh = await AuthService.refresh_tokens(refresh_token, db)
+    new_access, new_refresh = await auth_service.refresh_tokens(refresh_token)
 
     response.set_cookie(
         key=REFRESH_COOKIE_NAME,
@@ -63,13 +75,15 @@ async def refresh_token(
 
 
 @router.post("/logout", status_code=status.HTTP_200_OK)
+@limiter.limit("10/minute")
 async def logout(
+    request: Request,
+    auth_service: AuthServiceDep,
     response: Response,
-    db: AsyncSession = Depends(get_async_session),
     refresh_token: str | None = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
 ):
     if refresh_token:
-        await AuthService.logout(refresh_token, db)
+        await auth_service.logout(refresh_token)
 
     response.delete_cookie(
         key=REFRESH_COOKIE_NAME, httponly=True, secure=True, samesite="strict"

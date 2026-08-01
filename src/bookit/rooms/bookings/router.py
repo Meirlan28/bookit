@@ -1,12 +1,11 @@
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, status
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.bookit.auth.dependencies import get_current_user
 from src.bookit.auth.models import User
-from src.bookit.database import get_async_session
-
-from .schemas import BookingCreate, BookingResponse
-from .service import BookingService
+from src.bookit.rooms.bookings.dependencies import BookingServiceDep
+from src.bookit.rooms.bookings.schemas import BookingCreate, BookingResponse
 
 router = APIRouter(tags=["Bookings"])
 
@@ -19,21 +18,16 @@ router = APIRouter(tags=["Bookings"])
 async def create_booking(
     room_id: int,
     booking_data: BookingCreate,
-    db: AsyncSession = Depends(get_async_session),
-    current_user: User = Depends(get_current_user),
+    booking_service: BookingServiceDep,
+    current_user: Annotated[User, Depends(get_current_user)],
 ):
-    """Создать бронирование (Доступно любому авторизованному юзеру)."""
-    return await BookingService.create_booking(
-        room_id, current_user.id, booking_data, db
-    )
+    return await booking_service.create_booking(room_id, current_user.id, booking_data)
 
 
 @router.delete("/bookings/{booking_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_booking(
     booking_id: int,
-    db: AsyncSession = Depends(get_async_session),
-    current_user: User = Depends(get_current_user),
+    booking_service: BookingServiceDep,
+    current_user: Annotated[User, Depends(get_current_user)],
 ):
-    """Удалить бронирование (Юзер может удалить только свою бронь)."""
-    await BookingService.delete_booking(booking_id, current_user.id, db)
-    await BookingService.delete_booking(booking_id, current_user.id, db)
+    await booking_service.delete_booking(booking_id, current_user.id)

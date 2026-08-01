@@ -1,6 +1,6 @@
 from sqladmin import ModelView
 
-from .models import Booking
+from src.bookit.rooms.bookings.models import Booking
 
 
 class BookingAdmin(ModelView, model=Booking):
@@ -11,7 +11,5 @@ class BookingAdmin(ModelView, model=Booking):
         Booking.start_time,
         Booking.end_time,
     ]
-    column_sortable_list = [Booking.start_time]
-    icon = "fa-solid fa-calendar"
     column_sortable_list = [Booking.start_time]
     icon = "fa-solid fa-calendar"

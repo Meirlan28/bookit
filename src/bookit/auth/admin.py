@@ -3,10 +3,9 @@ from sqladmin.authentication import AuthenticationBackend
 from sqlalchemy import select
 from starlette.requests import Request
 
+from src.bookit.auth.models import Role, User
+from src.bookit.auth.utils import verify_password
 from src.bookit.database import async_session_maker
-
-from .models import Role, User
-from .utils import verify_password
 
 
 class AdminAuth(AuthenticationBackend):
@@ -46,11 +45,8 @@ class AdminAuth(AuthenticationBackend):
         return True
 
 
-# Визуальное представление пользователя
 class UserAdmin(ModelView, model=User):
     column_list = [User.id, User.email, User.role, User.is_active]
     column_searchable_list = [User.email]
-    column_sortable_list = [User.id, User.email]
-    icon = "fa-solid fa-user"
     column_sortable_list = [User.id, User.email]
     icon = "fa-solid fa-user"

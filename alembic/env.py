@@ -6,13 +6,11 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
-
-from src.bookit.config import settings
-
-from src.bookit.database import Base
 from src.bookit.auth.models import *
-from src.bookit.rooms.models import *
+from src.bookit.config import settings
+from src.bookit.database import Base
 from src.bookit.rooms.bookings.models import *
+from src.bookit.rooms.models import *
 
 config = context.config
 
@@ -20,7 +18,9 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL_asyncpg + "?async_fallback=True")
+config.set_main_option(
+    "sqlalchemy.url", settings.DATABASE_URL_asyncpg + "?async_fallback=True"
+)
 
 
 target_metadata = Base.metadata

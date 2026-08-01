@@ -15,4 +15,3 @@ class AuthConfig(BaseSettings):
 
 
 auth_settings = AuthConfig()
-auth_settings = AuthConfig()

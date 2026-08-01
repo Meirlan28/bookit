@@ -1,18 +1,20 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, model_validator
 
 
 class BookingCreate(BaseModel):
-    start_time: datetime
-    end_time: datetime
+    start_time: AwareDatetime
+    end_time: AwareDatetime
 
     @model_validator(mode="after")
     def validate_times(self) -> "BookingCreate":
         if self.start_time >= self.end_time:
-            raise ValueError("Время окончания должно быть позже времени начала.")
-        if self.start_time < datetime.utcnow():
-            raise ValueError("Нельзя создать бронь в прошлом.")
+            raise ValueError("end time must be greater than start time.")
+
+        if self.start_time < datetime.now(UTC):
+            raise ValueError("start time must be in the future.")
+
         return self
 
 
@@ -21,7 +23,5 @@ class BookingResponse(BookingCreate):
     user_id: int
     room_id: int
     created_at: datetime
-
-    model_config = ConfigDict(from_attributes=True)
 
     model_config = ConfigDict(from_attributes=True)

@@ -1,9 +1,14 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, Integer
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.bookit.database import Base
+
+if TYPE_CHECKING:
+    from src.bookit.auth.models import User
+    from src.bookit.rooms.models import Room
 
 
 class Booking(Base):
@@ -25,11 +30,8 @@ class Booking(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
     )
-
-    user: Mapped["User"] = relationship(back_populates="bookings")
-    room: Mapped["Room"] = relationship(back_populates="bookings")
 
     user: Mapped["User"] = relationship(back_populates="bookings")
     room: Mapped["Room"] = relationship(back_populates="bookings")

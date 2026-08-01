@@ -1,4 +1,5 @@
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
+
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -8,15 +9,10 @@ from sqlalchemy.orm import DeclarativeBase
 
 from src.bookit.config import settings
 
-engine = create_async_engine(
-    url=settings.DATABASE_URL_asyncpg,
-    echo=True
-)
+engine = create_async_engine(url=settings.DATABASE_URL_asyncpg, echo=True)
 
 async_session_maker = async_sessionmaker(
-    bind=engine,
-    class_=AsyncSession,
-    expire_on_commit=False
+    bind=engine, class_=AsyncSession, expire_on_commit=False
 )
 
 

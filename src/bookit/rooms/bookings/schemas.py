@@ -1,5 +1,7 @@
 from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, model_validator
+
 
 class BookingCreate(BaseModel):
     start_time: datetime
@@ -13,10 +15,13 @@ class BookingCreate(BaseModel):
             raise ValueError("Нельзя создать бронь в прошлом.")
         return self
 
+
 class BookingResponse(BookingCreate):
     id: int
     user_id: int
     room_id: int
     created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
     model_config = ConfigDict(from_attributes=True)

@@ -1,5 +1,6 @@
 from fastapi import HTTPException, status
 
+
 class BookingConflictException(HTTPException):
     def __init__(self):
         super().__init__(
@@ -20,3 +21,4 @@ class ForbiddenActionException(HTTPException):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Вы можете отменять только свои бронирования."
         )
+

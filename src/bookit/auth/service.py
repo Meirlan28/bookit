@@ -1,20 +1,18 @@
-from datetime import timedelta
-from datetime import timezone
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.bookit.auth.config import auth_settings
 from src.bookit.auth.constants import TOKEN_TYPE_ACCESS, TOKEN_TYPE_REFRESH
-from src.bookit.auth.exceptions import (
-    InvalidCredentialsException,
-    InvalidRefreshTokenException,
-    UserAlreadyExistsException,
-)
+from src.bookit.auth.exceptions import (InvalidCredentialsException,
+                                        InvalidRefreshTokenException,
+                                        UserAlreadyExistsException)
 from src.bookit.auth.models import RefreshToken, User
 from src.bookit.auth.schemas import UserCreate
-from src.bookit.auth.utils import create_jwt_token, decode_jwt_token, get_password_hash, verify_password
+from src.bookit.auth.utils import (create_jwt_token, decode_jwt_token,
+                                   get_password_hash, verify_password)
+
 
 class AuthService:
     @staticmethod
@@ -140,6 +138,10 @@ class AuthService:
         db_refresh_token = RefreshToken(
             token=token,
             user_id=user_id,
+            expires_at=expires_at
+        )
+        db.add(db_refresh_token)
+        await db.commit()
             expires_at=expires_at
         )
         db.add(db_refresh_token)

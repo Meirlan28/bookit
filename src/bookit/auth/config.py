@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class AuthConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -12,4 +13,6 @@ class AuthConfig(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int
     REFRESH_TOKEN_EXPIRE_DAYS: int
 
+
+auth_settings = AuthConfig()
 auth_settings = AuthConfig()

@@ -1,9 +1,12 @@
+import asyncio
+import random
+import string
 from datetime import UTC, datetime, timedelta
 
-from fastapi import BackgroundTasks
+from fastapi import BackgroundTasks, logger
 from fastapi_mail import MessageSchema, MessageType
-from pydantic import EmailStr
-from sqlalchemy import delete, select, update
+from pydantic import EmailStr, ValidationError
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.bookit.auth.config import auth_settings
@@ -16,8 +19,10 @@ from src.bookit.auth.email import fast_mail
 from src.bookit.auth.exceptions import (
     InvalidCredentialsException,
     InvalidRefreshTokenException,
+    InvalidTwoFactorCodeException,
     InvalidVerifyTokenException,
     LoginCooldownException,
+    UnrecognizedDeviceException,
     UserAlreadyExistsException,
     UserInactiveException,
     UserNotVerifiedException,
@@ -71,6 +76,7 @@ class AuthService:
         bg_tasks: BackgroundTasks,
         ip_address: str | None = None,
         user_agent: str | None = None,
+        device_code: str | None = None,
     ) -> tuple[str, str]:
         result = await self.db.execute(select(User).where(User.email == user_in.email))
         user = result.scalar_one_or_none()
@@ -110,6 +116,32 @@ class AuthService:
 
         if not user.is_verified:
             raise UserNotVerifiedException()
+
+        is_recognized = await self._is_device_recognized(
+            user.id, ip_address, user_agent
+        )
+
+        if not is_recognized:
+            now = datetime.now(UTC)
+            if not device_code:
+                code = self._generate_6_digit_code()
+                user.two_factor_code = get_password_hash(code)
+                user.two_factor_expires_at = now + timedelta(minutes=10)
+                await self.db.commit()
+
+                self.send_new_device_email(
+                    user.email, code, bg_tasks, ip_address, user_agent
+                )
+                raise UnrecognizedDeviceException()
+            else:
+                if not user.two_factor_expires_at or user.two_factor_expires_at < now:
+                    raise InvalidTwoFactorCodeException()
+                if not verify_password(device_code, user.two_factor_code):
+                    raise InvalidTwoFactorCodeException()
+
+                user.two_factor_code = None
+                user.two_factor_expires_at = None
+                await self.db.commit()
 
         access_token, refresh_token = self._generate_tokens(user.id)
         await self._save_refresh_token(
@@ -287,8 +319,58 @@ class AuthService:
             .where(
                 RefreshToken.user_id == user_id,
                 RefreshToken.is_revoked == False,
-                RefreshToken.token != hashed_token
+                RefreshToken.token != hashed_token,
             )
             .values(is_revoked=True)
         )
         await self.db.commit()
+
+    def _generate_6_digit_code(self) -> str:
+        return "".join(random.choices(string.digits, k=6))
+
+    async def _is_device_recognized(
+        self, user_id: int, ip_address: str | None, user_agent: str | None
+    ) -> bool:
+        total_sessions = await self.db.execute(
+            select(func.count())
+            .select_from(RefreshToken)
+            .where(RefreshToken.user_id == user_id)
+        )
+        if total_sessions.scalar() == 0:
+            return True
+
+        result = await self.db.execute(
+            select(RefreshToken)
+            .where(
+                RefreshToken.user_id == user_id,
+                RefreshToken.ip_address == ip_address,
+                RefreshToken.user_agent == user_agent,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
+
+    def send_new_device_email(
+        self,
+        user_email: str,
+        code: str,
+        background_tasks: BackgroundTasks,
+        ip: str | None,
+        ua: str | None,
+    ):
+        try:
+            message = MessageSchema(
+                subject="BookIt: Login from a new device",
+                recipients=[user_email],
+                body=(
+                    f"<h3>New device detected</h3>"
+                    f"<p>We noticed a login attempt from a new device.</p>"
+                    f"<ul><li>IP: {ip}</li><li>Browser/OS: {ua}</li></ul>"
+                    f"<p>Your verification code is: <b style='font-size: 20px;'>{code}</b></p>"
+                    f"<p>Valid for 10 minutes. Do not share it with anyone.</p>"
+                ),
+                subtype=MessageType.html,
+            )
+            asyncio.create_task(fast_mail.send_message(message))
+        except ValidationError as e:
+            logger.error(f"Pydantic email error: {e}")

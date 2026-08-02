@@ -5,6 +5,7 @@ from fastapi import (
     BackgroundTasks,
     Cookie,
     Depends,
+    Header,
     Request,
     Response,
     status,
@@ -69,18 +70,18 @@ async def login(
     response: Response,
     form_data: OAuth2PasswordRequestFormDep,
     background_tasks: BackgroundTasks,
+    x_device_code: str | None = Header(default=None),
 ):
     try:
         user_data = UserLogin(email=form_data.username, password=form_data.password)
     except ValidationError:
         raise InvalidCredentialsException()
 
-    # 🌟 Собираем метаданные устройства
     ip_address = request.client.host if request.client else None
     user_agent = request.headers.get("user-agent")
 
     access_token, refresh_token = await auth_service.authenticate_user(
-        user_data, background_tasks, ip_address, user_agent
+        user_data, background_tasks, ip_address, user_agent, x_device_code
     )
 
     background_tasks.add_task(auth_service.cleanup_expired_tokens)

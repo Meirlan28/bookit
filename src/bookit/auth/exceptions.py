@@ -67,3 +67,19 @@ class LoginCooldownException(HTTPException):
             detail=f"Too many failed login attempts. Please try again in {seconds_left} seconds.",
             headers={"Retry-After": str(seconds_left)},
         )
+
+
+class UnrecognizedDeviceException(HTTPException):
+    def __init__(self):
+        super().__init__(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Device not recognized. To log in, please confirm your identity using the code sent to your email.",
+        )
+
+
+class InvalidTwoFactorCodeException(HTTPException):
+    def __init__(self):
+        super().__init__(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired verification code.",
+        )

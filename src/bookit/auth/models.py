@@ -39,6 +39,11 @@ class User(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    two_factor_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    two_factor_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
 
 class RefreshToken(Base):
     __tablename__ = "refresh_tokens"

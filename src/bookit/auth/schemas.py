@@ -1,3 +1,4 @@
+from datetime import datetime
 from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -31,3 +32,14 @@ class UserResponse(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str
+
+
+class SessionResponse(BaseModel):
+    id: int
+    ip_address: str | None
+    user_agent: str | None
+    last_activity: datetime
+    expires_at: datetime
+
+    class Config:
+        from_attributes = True

@@ -56,7 +56,7 @@ class InvalidVerifyTokenException(HTTPException):
     def __init__(self):
         super().__init__(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Неверный или просроченный токен подтверждения",
+            detail="Wrong or expired verification token.",
         )
 
 

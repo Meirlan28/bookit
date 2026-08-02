@@ -22,5 +22,5 @@ class Room(Base):
     has_whiteboard: Mapped[bool] = mapped_column(Boolean, default=False)
 
     bookings: Mapped[list["Booking"]] = relationship(
-        back_populates="room", cascade="all, delete-orphan"
+        "Booking", back_populates="room", cascade="all, delete-orphan"
     )

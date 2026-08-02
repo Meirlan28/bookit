@@ -33,5 +33,5 @@ class Booking(Base):
         default=lambda: datetime.now(UTC),
     )
 
-    user: Mapped["User"] = relationship(back_populates="bookings")
-    room: Mapped["Room"] = relationship(back_populates="bookings")
+    user: Mapped["User"] = relationship("User", back_populates="bookings")
+    room: Mapped["Room"] = relationship("Room", back_populates="bookings")

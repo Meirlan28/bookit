@@ -19,6 +19,8 @@ from src.bookit.auth.exceptions import (
     InvalidVerifyTokenException,
     LoginCooldownException,
     UserAlreadyExistsException,
+    UserInactiveException,
+    UserNotVerifiedException,
 )
 from src.bookit.auth.models import RefreshToken, User
 from src.bookit.auth.schemas import UserCreate
@@ -64,7 +66,11 @@ class AuthService:
         return new_user, verify_token
 
     async def authenticate_user(
-        self, user_in: UserCreate, bg_tasks: BackgroundTasks
+        self,
+        user_in: UserCreate,
+        bg_tasks: BackgroundTasks,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
     ) -> tuple[str, str]:
         result = await self.db.execute(select(User).where(User.email == user_in.email))
         user = result.scalar_one_or_none()
@@ -99,20 +105,35 @@ class AuthService:
             user.last_failed_login_at = None
             await self.db.commit()
 
+        if not user.is_active:
+            raise UserInactiveException()
+
+        if not user.is_verified:
+            raise UserNotVerifiedException()
+
         access_token, refresh_token = self._generate_tokens(user.id)
-        await self._save_refresh_token(refresh_token, user.id)
+        await self._save_refresh_token(
+            refresh_token, user.id, ip_address=ip_address, user_agent=user_agent
+        )
 
         return access_token, refresh_token
 
-    async def refresh_tokens(self, refresh_token: str) -> tuple[str, str]:
+    async def refresh_tokens(
+        self,
+        refresh_token: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> tuple[str, str]:
         payload = decode_jwt_token(refresh_token)
         if not payload or payload.get("type") != TOKEN_TYPE_REFRESH:
             raise InvalidRefreshTokenException()
 
         user_id = int(payload.get("sub"))
 
+        hashed_token = hash_token(refresh_token)
+
         result = await self.db.execute(
-            select(RefreshToken).where(RefreshToken.token == refresh_token)
+            select(RefreshToken).where(RefreshToken.token == hashed_token)
         )
         db_token = result.scalar_one_or_none()
 
@@ -139,9 +160,12 @@ class AuthService:
         return new_access, new_refresh
 
     async def logout(self, refresh_token: str):
+
+        hashed_token = hash_token(refresh_token)
+
         await self.db.execute(
             update(RefreshToken)
-            .where(RefreshToken.token == refresh_token)
+            .where(RefreshToken.token == hashed_token)
             .values(is_revoked=True)
         )
         await self.db.commit()
@@ -165,14 +189,25 @@ class AuthService:
         )
         return access, refresh
 
-    async def _save_refresh_token(self, token: str, user_id: int):
+    async def _save_refresh_token(
+        self,
+        token: str,
+        user_id: int,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ):
         expires_at = datetime.now(UTC) + timedelta(
             days=auth_settings.REFRESH_TOKEN_EXPIRE_DAYS
         )
         hashed_token = hash_token(token)
 
         db_refresh_token = RefreshToken(
-            token=hashed_token, user_id=user_id, expires_at=expires_at
+            token=hashed_token,
+            user_id=user_id,
+            expires_at=expires_at,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            last_activity=datetime.now(UTC),
         )
         self.db.add(db_refresh_token)
         await self.db.commit()
@@ -217,7 +252,9 @@ class AuthService:
 
         background_tasks.add_task(fast_mail.send_message, message)
 
-    def send_security_alert_email(self, user_email: EmailStr, background_tasks: BackgroundTasks):
+    def send_security_alert_email(
+        self, user_email: EmailStr, background_tasks: BackgroundTasks
+    ):
         message = MessageSchema(
             subject="Security Alert: Multiple Failed Login Attempts",
             recipients=[user_email],
@@ -231,3 +268,27 @@ class AuthService:
         )
 
         background_tasks.add_task(fast_mail.send_message, message)
+
+    async def get_active_sessions(self, user_id: int):
+        result = await self.db.execute(
+            select(RefreshToken).where(
+                RefreshToken.user_id == user_id,
+                RefreshToken.is_revoked == False,
+                RefreshToken.expires_at > datetime.now(UTC),
+            )
+        )
+        return result.scalars().all()
+
+    async def revoke_other_sessions(self, user_id: int, current_refresh_token: str):
+        hashed_token = hash_token(current_refresh_token)
+
+        await self.db.execute(
+            update(RefreshToken)
+            .where(
+                RefreshToken.user_id == user_id,
+                RefreshToken.is_revoked == False,
+                RefreshToken.token != hashed_token
+            )
+            .values(is_revoked=True)
+        )
+        await self.db.commit()

@@ -33,6 +33,9 @@ async def get_current_user(
     if not user or not user.is_active:
         raise InvalidTokenException()
 
+    if not user.is_verified:
+        raise InvalidTokenException()
+
     return user
 
 

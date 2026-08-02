@@ -9,6 +9,7 @@ from fastapi import (
     Response,
     status,
 )
+from pydantic_core import ValidationError
 
 from src.bookit.auth.config import auth_settings
 from src.bookit.auth.constants import REFRESH_COOKIE_NAME, TOKEN_TYPE_BEARER
@@ -17,9 +18,18 @@ from src.bookit.auth.dependencies import (
     OAuth2PasswordRequestFormDep,
     get_current_user,
 )
-from src.bookit.auth.exceptions import InvalidRefreshTokenException
+from src.bookit.auth.exceptions import (
+    InvalidCredentialsException,
+    InvalidRefreshTokenException,
+)
 from src.bookit.auth.models import User
-from src.bookit.auth.schemas import TokenResponse, UserCreate, UserLogin, UserResponse
+from src.bookit.auth.schemas import (
+    SessionResponse,
+    TokenResponse,
+    UserCreate,
+    UserLogin,
+    UserResponse,
+)
 from src.bookit.limiter import limiter
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -60,9 +70,18 @@ async def login(
     form_data: OAuth2PasswordRequestFormDep,
     background_tasks: BackgroundTasks,
 ):
-    user_data = UserLogin(email=form_data.username, password=form_data.password)
+    try:
+        user_data = UserLogin(email=form_data.username, password=form_data.password)
+    except ValidationError:
+        raise InvalidCredentialsException()
 
-    access_token, refresh_token = await auth_service.authenticate_user(user_data, background_tasks)
+    # 🌟 Собираем метаданные устройства
+    ip_address = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+
+    access_token, refresh_token = await auth_service.authenticate_user(
+        user_data, background_tasks, ip_address, user_agent
+    )
 
     background_tasks.add_task(auth_service.cleanup_expired_tokens)
 
@@ -115,7 +134,10 @@ async def logout(
         await auth_service.logout(refresh_token)
 
     response.delete_cookie(
-        key=REFRESH_COOKIE_NAME, httponly=True, secure=auth_settings.REFRESH_COOKIE_SECURE, samesite="strict"
+        key=REFRESH_COOKIE_NAME,
+        httponly=True,
+        secure=auth_settings.REFRESH_COOKIE_SECURE,
+        samesite="strict",
     )
     return {"message": "Successfully logged out"}
 
@@ -130,3 +152,28 @@ async def verify_email(
     await auth_service.verify_email(token)
 
     return {"message": "Email self-verification successful. You can now log in."}
+
+
+@router.get("/sessions", response_model=list[SessionResponse])
+@limiter.limit("10/minute")
+async def get_active_sessions(
+    request: Request,
+    auth_service: AuthServiceDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    return await auth_service.get_active_sessions(current_user.id)
+
+
+@router.delete("/sessions/others", status_code=status.HTTP_200_OK)
+@limiter.limit("5/minute")
+async def terminate_other_sessions(
+    request: Request,
+    auth_service: AuthServiceDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+    refresh_token: str = Cookie(alias=REFRESH_COOKIE_NAME),
+):
+    if not refresh_token:
+        raise InvalidRefreshTokenException()
+
+    await auth_service.revoke_other_sessions(current_user.id, refresh_token)
+    return {"message": "All other sessions have been terminated successfully."}

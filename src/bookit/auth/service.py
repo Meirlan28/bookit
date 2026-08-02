@@ -13,12 +13,14 @@ from src.bookit.auth.config import auth_settings
 from src.bookit.auth.constants import (
     TOKEN_TYPE_ACCESS,
     TOKEN_TYPE_REFRESH,
+    TOKEN_TYPE_RESET_PASSWORD,
     TOKEN_TYPE_VERIFY_EMAIL,
 )
 from src.bookit.auth.email import fast_mail
 from src.bookit.auth.exceptions import (
     InvalidCredentialsException,
     InvalidRefreshTokenException,
+    InvalidResetTokenException,
     InvalidTwoFactorCodeException,
     InvalidVerifyTokenException,
     LoginCooldownException,
@@ -28,7 +30,7 @@ from src.bookit.auth.exceptions import (
     UserNotVerifiedException,
 )
 from src.bookit.auth.models import RefreshToken, User
-from src.bookit.auth.schemas import UserCreate
+from src.bookit.auth.schemas import ResetPasswordRequest, UserCreate
 from src.bookit.auth.utils import (
     create_jwt_token,
     decode_jwt_token,
@@ -374,3 +376,63 @@ class AuthService:
             asyncio.create_task(fast_mail.send_message(message))
         except ValidationError as e:
             logger.error(f"Pydantic email error: {e}")
+
+    def send_password_reset_email(self, user_email: str, token: str):
+        reset_url = (
+            f"{auth_settings.BASE_API_URL}/api/v1/auth/reset-password?token={token}"
+        )
+
+        try:
+            message = MessageSchema(
+                subject="BookIt: Password Reset Request",
+                recipients=[user_email],
+                body=(
+                    f"<h3>Password Reset</h3>"
+                    f"<p>You requested to reset your password.</p>"
+                    f"<p>Click the link below to set a new password:</p>"
+                    f"<a href='{reset_url}'>Reset Password</a>"
+                    f"<p>If you didn't request this, just ignore this email. The link expires in 15 minutes.</p>"
+                ),
+                subtype=MessageType.html,
+            )
+            asyncio.create_task(fast_mail.send_message(message))
+        except ValidationError as e:
+            logger.error(f"Pydantic email error in reset password: {e}")
+
+    async def request_password_reset(self, email: str):
+        result = await self.db.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+
+        if not user or not user.is_active:
+            return
+
+        reset_token = create_jwt_token(
+            data={"sub": str(user.id)},
+            token_type=TOKEN_TYPE_RESET_PASSWORD,
+            expires_delta=timedelta(minutes=15),
+        )
+
+        self.send_password_reset_email(user.email, reset_token)
+
+    async def reset_password(self, payload_data: ResetPasswordRequest):
+        payload = decode_jwt_token(payload_data.token)
+
+        if not payload or payload.get("type") != TOKEN_TYPE_RESET_PASSWORD:
+            raise InvalidResetTokenException()
+
+        user_id = int(payload.get("sub"))
+        result = await self.db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+
+        if not user or not user.is_active:
+            raise InvalidResetTokenException()
+
+        user.hashed_password = get_password_hash(payload_data.new_password)
+
+        await self.db.execute(
+            update(RefreshToken)
+            .where(RefreshToken.user_id == user.id)
+            .values(is_revoked=True)
+        )
+
+        await self.db.commit()

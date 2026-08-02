@@ -83,3 +83,11 @@ class InvalidTwoFactorCodeException(HTTPException):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired verification code.",
         )
+
+
+class InvalidResetTokenException(HTTPException):
+    def __init__(self):
+        super().__init__(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Not valid or expired password reset token.",
+        )

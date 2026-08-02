@@ -25,6 +25,8 @@ from src.bookit.auth.exceptions import (
 )
 from src.bookit.auth.models import User
 from src.bookit.auth.schemas import (
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
     SessionResponse,
     TokenResponse,
     UserCreate,
@@ -178,3 +180,27 @@ async def terminate_other_sessions(
 
     await auth_service.revoke_other_sessions(current_user.id, refresh_token)
     return {"message": "All other sessions have been terminated successfully."}
+
+
+@router.post("/forgot-password", status_code=status.HTTP_200_OK)
+@limiter.limit("3/minute")
+async def forgot_password(
+    request: Request,
+    body: ForgotPasswordRequest,
+    auth_service: AuthServiceDep,
+):
+    await auth_service.request_password_reset(body.email)
+    return {
+        "message": "If such an email exists, a link to reset the password has been sent."
+    }
+
+
+@router.post("/reset-password", status_code=status.HTTP_200_OK)
+@limiter.limit("5/minute")
+async def reset_password(
+    request: Request,
+    body: ResetPasswordRequest,
+    auth_service: AuthServiceDep,
+):
+    await auth_service.reset_password(body)
+    return {"message": "The password has been successfully reset. You can now log in with your new password."}

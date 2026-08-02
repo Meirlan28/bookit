@@ -62,7 +62,7 @@ async def login(
 ):
     user_data = UserLogin(email=form_data.username, password=form_data.password)
 
-    access_token, refresh_token = await auth_service.authenticate_user(user_data)
+    access_token, refresh_token = await auth_service.authenticate_user(user_data, background_tasks)
 
     background_tasks.add_task(auth_service.cleanup_expired_tokens)
 

@@ -34,6 +34,11 @@ class User(Base):
         back_populates="user", cascade="all, delete-orphan"
     )
 
+    failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_failed_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
 
 class RefreshToken(Base):
     __tablename__ = "refresh_tokens"

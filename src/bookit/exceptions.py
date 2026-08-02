@@ -26,6 +26,5 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 
 
 def register_exception_handlers(app: FastAPI) -> None:
-    """Регистрация всех глобальных обработчиков исключений."""
     app.add_exception_handler(SQLAlchemyError, sqlalchemy_exception_handler)
     app.add_exception_handler(Exception, global_exception_handler)

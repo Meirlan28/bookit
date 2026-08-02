@@ -17,9 +17,8 @@ from src.bookit.auth.exceptions import (
     InvalidCredentialsException,
     InvalidRefreshTokenException,
     InvalidVerifyTokenException,
+    LoginCooldownException,
     UserAlreadyExistsException,
-    UserInactiveException,
-    UserNotVerifiedException,
 )
 from src.bookit.auth.models import RefreshToken, User
 from src.bookit.auth.schemas import UserCreate
@@ -64,18 +63,41 @@ class AuthService:
 
         return new_user, verify_token
 
-    async def authenticate_user(self, user_in: UserCreate) -> tuple[str, str]:
+    async def authenticate_user(
+        self, user_in: UserCreate, bg_tasks: BackgroundTasks
+    ) -> tuple[str, str]:
         result = await self.db.execute(select(User).where(User.email == user_in.email))
         user = result.scalar_one_or_none()
 
-        if not user or not verify_password(user_in.password, user.hashed_password):
+        if not user:
             raise InvalidCredentialsException()
 
-        if not user.is_active:
-            raise UserInactiveException()
+        now = datetime.now(UTC)
 
-        if not user.is_verified:
-            raise UserNotVerifiedException()
+        if user.failed_login_attempts >= 3 and user.last_failed_login_at:
+            delay_seconds = 5 * (3 ** (user.failed_login_attempts - 3))
+            cooldown_ends_at = self._normalize_datetime(
+                user.last_failed_login_at
+            ) + timedelta(seconds=delay_seconds)
+
+            if now < cooldown_ends_at:
+                seconds_left = int((cooldown_ends_at - now).total_seconds())
+                raise LoginCooldownException(seconds_left=seconds_left)
+
+        if not verify_password(user_in.password, user.hashed_password):
+            user.failed_login_attempts += 1
+            user.last_failed_login_at = now
+
+            if user.failed_login_attempts == 5:
+                self.send_security_alert_email(user.email, bg_tasks)
+
+            await self.db.commit()
+            raise InvalidCredentialsException()
+
+        if user.failed_login_attempts > 0:
+            user.failed_login_attempts = 0
+            user.last_failed_login_at = None
+            await self.db.commit()
 
         access_token, refresh_token = self._generate_tokens(user.id)
         await self._save_refresh_token(refresh_token, user.id)
@@ -189,6 +211,21 @@ class AuthService:
                 f"<p>Please verify your email by clicking the link below:</p>"
                 f"<a href='{verify_url}'>Verify Email</a>"
                 f"<p>The link will expire in {auth_settings.VERIFY_EMAIL_TOKEN_EXPIRE_MINUTES} minutes.</p>"
+            ),
+            subtype=MessageType.html,
+        )
+
+        background_tasks.add_task(fast_mail.send_message, message)
+
+    def send_security_alert_email(self, user_email: EmailStr, background_tasks: BackgroundTasks):
+        message = MessageSchema(
+            subject="Security Alert: Multiple Failed Login Attempts",
+            recipients=[user_email],
+            body=(
+                f"<p>Hello!</p>"
+                f"<p>We noticed multiple failed login attempts on your account.</p>"
+                f"<p>If this wasn't you, we recommend changing your password immediately.</p>"
+                f"<p>If you need assistance, please contact our support team.</p>"
             ),
             subtype=MessageType.html,
         )

@@ -58,3 +58,12 @@ class InvalidVerifyTokenException(HTTPException):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Неверный или просроченный токен подтверждения",
         )
+
+
+class LoginCooldownException(HTTPException):
+    def __init__(self, seconds_left: int):
+        super().__init__(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many failed login attempts. Please try again in {seconds_left} seconds.",
+            headers={"Retry-After": str(seconds_left)},
+        )

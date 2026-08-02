@@ -139,10 +139,12 @@ async def logout(
     response.delete_cookie(
         key=REFRESH_COOKIE_NAME,
         httponly=True,
-        secure=auth_settings.REFRESH_COOKIE_SECURE,
-        samesite="strict",
+        secure=auth_settings.SECURE_COOKIES,
+        samesite="lax",
+        path="/",
     )
-    return {"message": "Successfully logged out"}
+
+    return {"message": "Вы успешно вышли из системы"}
 
 
 @router.get("/verify", status_code=status.HTTP_200_OK)
@@ -188,8 +190,9 @@ async def forgot_password(
     request: Request,
     body: ForgotPasswordRequest,
     auth_service: AuthServiceDep,
+    background_tasks: BackgroundTasks,
 ):
-    await auth_service.request_password_reset(body.email)
+    await auth_service.request_password_reset(body.email, background_tasks)
     return {
         "message": "If such an email exists, a link to reset the password has been sent."
     }

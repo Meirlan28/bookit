@@ -164,8 +164,13 @@ class AuthService:
 
         user_id = int(payload.get("sub"))
 
-        hashed_token = hash_token(refresh_token)
+        user_result = await self.db.execute(select(User).where(User.id == user_id))
+        user = user_result.scalar_one_or_none()
 
+        if not user or not user.is_active or not user.is_verified:
+            raise InvalidRefreshTokenException()
+
+        hashed_token = hash_token(refresh_token)
         result = await self.db.execute(
             select(RefreshToken).where(RefreshToken.token == hashed_token)
         )
@@ -175,21 +180,23 @@ class AuthService:
             raise InvalidRefreshTokenException()
 
         if db_token.is_revoked:
-            await self.db.execute(
-                update(RefreshToken)
-                .where(RefreshToken.user_id == user_id)
-                .values(is_revoked=True)
-            )
-            await self.db.commit()
             raise InvalidRefreshTokenException()
 
         if self._normalize_datetime(db_token.expires_at) < datetime.now(UTC):
             raise InvalidRefreshTokenException()
 
-        db_token.is_revoked = True
-
         new_access, new_refresh = self._generate_tokens(user_id)
-        await self._save_refresh_token(new_refresh, user_id)
+
+        db_token.token = hash_token(new_refresh)
+        db_token.expires_at = datetime.now(UTC) + timedelta(days=auth_settings.REFRESH_TOKEN_EXPIRE_DAYS)
+        db_token.last_activity = datetime.now(UTC)
+
+        if ip_address:
+            db_token.ip_address = ip_address
+        if user_agent:
+            db_token.user_agent = user_agent
+
+        await self.db.commit()
 
         return new_access, new_refresh
 
@@ -356,7 +363,6 @@ class AuthService:
         self,
         user_email: str,
         code: str,
-        background_tasks: BackgroundTasks,
         ip: str | None,
         ua: str | None,
     ):
@@ -377,7 +383,7 @@ class AuthService:
         except ValidationError as e:
             logger.error(f"Pydantic email error: {e}")
 
-    def send_password_reset_email(self, user_email: str, token: str):
+    def send_password_reset_email(self, user_email: str, token: str, background_tasks: BackgroundTasks):
         reset_url = (
             f"{auth_settings.BASE_API_URL}/api/v1/auth/reset-password?token={token}"
         )
@@ -395,11 +401,11 @@ class AuthService:
                 ),
                 subtype=MessageType.html,
             )
-            asyncio.create_task(fast_mail.send_message(message))
+            background_tasks.add_task(fast_mail.send_message, message)
         except ValidationError as e:
             logger.error(f"Pydantic email error in reset password: {e}")
 
-    async def request_password_reset(self, email: str):
+    async def request_password_reset(self, email: str, background_tasks: BackgroundTasks):
         result = await self.db.execute(select(User).where(User.email == email))
         user = result.scalar_one_or_none()
 
@@ -412,7 +418,7 @@ class AuthService:
             expires_delta=timedelta(minutes=15),
         )
 
-        self.send_password_reset_email(user.email, reset_token)
+        self.send_password_reset_email(user.email, reset_token, background_tasks)
 
     async def reset_password(self, payload_data: ResetPasswordRequest):
         payload = decode_jwt_token(payload_data.token)

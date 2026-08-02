@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from typing import Any
 from uuid import uuid4
 
@@ -39,3 +40,7 @@ def decode_jwt_token(token: str) -> dict[str, Any] | None:
         )
     except jwt.PyJWTError:
         return None
+
+
+def hash_token(token: str) -> str:
+    return sha256(token.encode("utf-8")).hexdigest()

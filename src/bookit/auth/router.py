@@ -1,13 +1,37 @@
-from fastapi import APIRouter, BackgroundTasks, Cookie, Request, Response, status
+from typing import Annotated
+
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Cookie,
+    Depends,
+    Request,
+    Response,
+    status,
+)
 
 from src.bookit.auth.config import auth_settings
 from src.bookit.auth.constants import REFRESH_COOKIE_NAME, TOKEN_TYPE_BEARER
-from src.bookit.auth.dependencies import AuthServiceDep, OAuth2PasswordRequestFormDep
+from src.bookit.auth.dependencies import (
+    AuthServiceDep,
+    OAuth2PasswordRequestFormDep,
+    get_current_user,
+)
 from src.bookit.auth.exceptions import InvalidRefreshTokenException
+from src.bookit.auth.models import User
 from src.bookit.auth.schemas import TokenResponse, UserCreate, UserLogin, UserResponse
 from src.bookit.limiter import limiter
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+
+@router.get("/me", response_model=UserResponse)
+@limiter.limit("20/minute")
+async def get_me(
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    return current_user
 
 
 @router.post(
@@ -18,8 +42,13 @@ async def register(
     auth_service: AuthServiceDep,
     request: Request,
     user_data: UserCreate,
+    bg_tasks: BackgroundTasks,
 ):
-    return await auth_service.register_new_user(user_data)
+    user, verify_token = await auth_service.register_new_user(user_data)
+
+    auth_service.send_verification_email(user.email, verify_token, bg_tasks)
+
+    return user
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -41,7 +70,7 @@ async def login(
         key=REFRESH_COOKIE_NAME,
         value=refresh_token,
         httponly=True,
-        secure=True,
+        secure=auth_settings.REFRESH_COOKIE_SECURE,
         samesite="strict",
         max_age=auth_settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
     )
@@ -66,7 +95,7 @@ async def refresh_token(
         key=REFRESH_COOKIE_NAME,
         value=new_refresh,
         httponly=True,
-        secure=True,
+        secure=auth_settings.REFRESH_COOKIE_SECURE,
         samesite="strict",
         max_age=auth_settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
     )
@@ -77,8 +106,8 @@ async def refresh_token(
 @router.post("/logout", status_code=status.HTTP_200_OK)
 @limiter.limit("10/minute")
 async def logout(
-    request: Request,
     auth_service: AuthServiceDep,
+    request: Request,
     response: Response,
     refresh_token: str | None = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
 ):
@@ -86,6 +115,18 @@ async def logout(
         await auth_service.logout(refresh_token)
 
     response.delete_cookie(
-        key=REFRESH_COOKIE_NAME, httponly=True, secure=True, samesite="strict"
+        key=REFRESH_COOKIE_NAME, httponly=True, secure=auth_settings.REFRESH_COOKIE_SECURE, samesite="strict"
     )
     return {"message": "Successfully logged out"}
+
+
+@router.get("/verify", status_code=status.HTTP_200_OK)
+@limiter.limit("10/minute")
+async def verify_email(
+    auth_service: AuthServiceDep,
+    token: str,
+    request: Request,
+):
+    await auth_service.verify_email(token)
+
+    return {"message": "Email self-verification successful. You can now log in."}

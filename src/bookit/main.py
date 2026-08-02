@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from sqladmin import Admin
+from starlette.middleware.sessions import SessionMiddleware
 
 from src.bookit.auth.admin import AdminAuth, UserAdmin
 from src.bookit.auth.config import auth_settings
@@ -39,6 +40,8 @@ def create_app() -> FastAPI:
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
+
+    app.add_middleware(SessionMiddleware, secret_key=auth_settings.SECRET_KEY)
 
     register_exception_handlers(app)
 

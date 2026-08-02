@@ -22,6 +22,7 @@ class UserResponse(BaseModel):
     id: int
     email: EmailStr
     is_active: bool
+    is_verified: bool
     role: Role
 
     model_config = ConfigDict(from_attributes=True)

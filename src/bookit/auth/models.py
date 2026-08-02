@@ -26,6 +26,7 @@ class User(Base):
     )
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_verified: Mapped[bool] = mapped_column(Boolean, default=False)
 
     role: Mapped[Role] = mapped_column(SQLEnum(Role), default=Role.USER, nullable=False)
 

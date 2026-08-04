@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BookIt Notification</title>
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 20px; }
+        .container { background-color: #ffffff; max-width: 600px; margin: 0 auto; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .header { font-size: 24px; font-weight: bold; color: #333333; margin-bottom: 20px; text-align: center; }
+        .footer { font-size: 12px; color: #888888; margin-top: 30px; text-align: center; border-top: 1px solid #eeeeee; padding-top: 20px; }
+        .button { display: inline-block; padding: 12px 24px; background-color: #007bff; color: #ffffff; text-decoration: none; border-radius: 4px; font-weight: bold; }
+        .highlight { font-size: 24px; font-weight: bold; letter-spacing: 2px; color: #333; background: #f0f0f0; padding: 10px; display: inline-block; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            BookIt
+        </div>
+
+        {% block content %}
+        {% endblock %}
+
+        <div class="footer">
+            <p>If you didn't request this email, you can safely ignore it.</p>
+            <p>&copy; 2026 BookIt. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>

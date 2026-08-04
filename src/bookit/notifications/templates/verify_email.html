@@ -1,0 +1,16 @@
+<!-- src/bookit/notifications/templates/verify_email.html -->
+{% extends "base.html" %}
+
+{% block content %}
+    <p>Hello!</p>
+    <p>Thank you for registering with <strong>BookIt</strong>. We're excited to have you on board.</p>
+    <p>Please verify your email address by clicking the button below:</p>
+
+    <div style="text-align: center; margin: 30px 0;">
+        <a href="{{ base_url }}/verify-email?token={{ token }}" class="button">
+            Verify My Email
+        </a>
+    </div>
+
+    <p><em>Note: This link will expire in a few minutes for security reasons.</em></p>
+{% endblock %}

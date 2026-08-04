@@ -10,6 +10,14 @@ from src.bookit.rooms.bookings.schemas import BookingCreate, BookingResponse
 router = APIRouter(tags=["Bookings"])
 
 
+@router.get("/bookings", response_model=list[BookingResponse])
+async def get_bookings(
+    booking_service: BookingServiceDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    return await booking_service.get_user_bookings(current_user.id)
+
+
 @router.post(
     "/rooms/{room_id}/bookings",
     response_model=BookingResponse,

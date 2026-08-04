@@ -1,14 +1,12 @@
-import asyncio
-import random
-import string
+import math
+import secrets
 from datetime import UTC, datetime, timedelta
 
-from fastapi import BackgroundTasks, logger
-from fastapi_mail import MessageSchema, MessageType
-from pydantic import EmailStr, ValidationError
+from fastapi import BackgroundTasks
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bookit.notifications.service import EmailService
 from src.bookit.auth.config import auth_settings
 from src.bookit.auth.constants import (
     TOKEN_TYPE_ACCESS,
@@ -16,21 +14,27 @@ from src.bookit.auth.constants import (
     TOKEN_TYPE_RESET_PASSWORD,
     TOKEN_TYPE_VERIFY_EMAIL,
 )
-from src.bookit.auth.email import fast_mail
 from src.bookit.auth.exceptions import (
-    InvalidCredentialsException,
-    InvalidRefreshTokenException,
     InvalidResetTokenException,
-    InvalidTwoFactorCodeException,
     InvalidVerifyTokenException,
-    LoginCooldownException,
-    UnrecognizedDeviceException,
-    UserAlreadyExistsException,
-    UserInactiveException,
-    UserNotVerifiedException,
 )
 from src.bookit.auth.models import RefreshToken, User
-from src.bookit.auth.schemas import ResetPasswordRequest, UserCreate
+from src.bookit.auth.schemas import (
+    AuthFailure,
+    AuthResult,
+    AuthSuccess,
+    InvalidCredentialsResult,
+    LoginCooldownResult,
+    NewDeviceVerificationRequired,
+    RegistrationFailure,
+    RegistrationResult,
+    RegistrationSuccess,
+    ResetPasswordRequest,
+    TokenRefreshFailure,
+    TokenRefreshResult,
+    TokenRefreshSuccess,
+    UserCreate,
+)
 from src.bookit.auth.utils import (
     create_jwt_token,
     decode_jwt_token,
@@ -41,8 +45,11 @@ from src.bookit.auth.utils import (
 
 
 class AuthService:
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, email_service: EmailService):
         self.db = db
+        self.email_service = email_service
+
+    # registraion and authentication methods
 
     @staticmethod
     def _normalize_datetime(value: datetime) -> datetime:
@@ -50,19 +57,27 @@ class AuthService:
             return value.replace(tzinfo=UTC)
         return value.astimezone(UTC)
 
-    async def register_new_user(self, user_in: UserCreate) -> tuple[User, str]:
+    async def register_new_user(
+        self,
+        user_in: UserCreate,
+    ) -> RegistrationResult:
         result = await self.db.execute(select(User).where(User.email == user_in.email))
-        if result.scalar_one_or_none():
-            raise UserAlreadyExistsException()
+        existing_user = result.scalar_one_or_none()
+
+        if existing_user is not None:
+            return RegistrationFailure.USER_ALREADY_EXISTS
 
         new_user = User(
-            email=user_in.email, hashed_password=get_password_hash(user_in.password)
+            email=user_in.email,
+            hashed_password=get_password_hash(user_in.password),
         )
+
         self.db.add(new_user)
+
         await self.db.commit()
         await self.db.refresh(new_user)
 
-        verify_token = create_jwt_token(
+        verification_token = create_jwt_token(
             data={"sub": str(new_user.id)},
             token_type=TOKEN_TYPE_VERIFY_EMAIL,
             expires_delta=timedelta(
@@ -70,137 +85,210 @@ class AuthService:
             ),
         )
 
-        return new_user, verify_token
+        return RegistrationSuccess(
+            user_id=new_user.id,
+            email=new_user.email,
+            verification_token=verification_token,
+        )
 
     async def authenticate_user(
         self,
         user_in: UserCreate,
-        bg_tasks: BackgroundTasks,
         ip_address: str | None = None,
         user_agent: str | None = None,
         device_code: str | None = None,
-    ) -> tuple[str, str]:
+    ) -> AuthResult:
         result = await self.db.execute(select(User).where(User.email == user_in.email))
         user = result.scalar_one_or_none()
 
-        if not user:
-            raise InvalidCredentialsException()
+        if user is None:
+            return InvalidCredentialsResult()
 
         now = datetime.now(UTC)
 
-        if user.failed_login_attempts >= 3 and user.last_failed_login_at:
-            delay_seconds = 5 * (3 ** (user.failed_login_attempts - 3))
-            cooldown_ends_at = self._normalize_datetime(
-                user.last_failed_login_at
-            ) + timedelta(seconds=delay_seconds)
+        cooldown_result = self._get_login_cooldown_result(user, now)
 
-            if now < cooldown_ends_at:
-                seconds_left = int((cooldown_ends_at - now).total_seconds())
-                raise LoginCooldownException(seconds_left=seconds_left)
+        if cooldown_result is not None:
+            return cooldown_result
 
         if not verify_password(user_in.password, user.hashed_password):
-            user.failed_login_attempts += 1
-            user.last_failed_login_at = now
+            return await self._handle_invalid_password(user, now)
 
-            if user.failed_login_attempts == 5:
-                self.send_security_alert_email(user.email, bg_tasks)
-
-            await self.db.commit()
-            raise InvalidCredentialsException()
-
-        if user.failed_login_attempts > 0:
-            user.failed_login_attempts = 0
-            user.last_failed_login_at = None
-            await self.db.commit()
+        await self._reset_failed_login_attempts(user)
 
         if not user.is_active:
-            raise UserInactiveException()
+            return AuthFailure.USER_INACTIVE
 
         if not user.is_verified:
-            raise UserNotVerifiedException()
+            return AuthFailure.USER_NOT_VERIFIED
 
         is_recognized = await self._is_device_recognized(
-            user.id, ip_address, user_agent
+            user_id=user.id,
+            ip_address=ip_address,
+            user_agent=user_agent,
         )
 
         if not is_recognized:
-            now = datetime.now(UTC)
-            if not device_code:
-                code = self._generate_6_digit_code()
-                user.two_factor_code = get_password_hash(code)
-                user.two_factor_expires_at = now + timedelta(minutes=10)
-                await self.db.commit()
+            device_result = await self._handle_unrecognized_device(
+                user=user,
+                now=now,
+                device_code=device_code,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
 
-                self.send_new_device_email(
-                    user.email, code, bg_tasks, ip_address, user_agent
-                )
-                raise UnrecognizedDeviceException()
-            else:
-                if not user.two_factor_expires_at or user.two_factor_expires_at < now:
-                    raise InvalidTwoFactorCodeException()
-                if not verify_password(device_code, user.two_factor_code):
-                    raise InvalidTwoFactorCodeException()
-
-                user.two_factor_code = None
-                user.two_factor_expires_at = None
-                await self.db.commit()
+            if device_result is not None:
+                return device_result
 
         access_token, refresh_token = self._generate_tokens(user.id)
+
         await self._save_refresh_token(
-            refresh_token, user.id, ip_address=ip_address, user_agent=user_agent
+            token=refresh_token,
+            user_id=user.id,
+            ip_address=ip_address,
+            user_agent=user_agent,
         )
 
-        return access_token, refresh_token
+        return AuthSuccess(
+            access_token=access_token,
+            refresh_token=refresh_token,
+        )
 
-    async def refresh_tokens(
+    def _get_login_cooldown_result(
         self,
-        refresh_token: str,
-        ip_address: str | None = None,
-        user_agent: str | None = None,
-    ) -> tuple[str, str]:
-        payload = decode_jwt_token(refresh_token)
-        if not payload or payload.get("type") != TOKEN_TYPE_REFRESH:
-            raise InvalidRefreshTokenException()
+        user: User,
+        now: datetime,
+    ) -> LoginCooldownResult | None:
+        if (
+            user.failed_login_attempts <= auth_settings.MAX_LOGIN_ATTEMPTS
+            or user.last_failed_login_at is None
+        ):
+            return None
 
-        user_id = int(payload.get("sub"))
-
-        user_result = await self.db.execute(select(User).where(User.id == user_id))
-        user = user_result.scalar_one_or_none()
-
-        if not user or not user.is_active or not user.is_verified:
-            raise InvalidRefreshTokenException()
-
-        hashed_token = hash_token(refresh_token)
-        result = await self.db.execute(
-            select(RefreshToken).where(RefreshToken.token == hashed_token)
+        attempts_over_limit = (
+            user.failed_login_attempts - auth_settings.MAX_LOGIN_ATTEMPTS - 1
         )
-        db_token = result.scalar_one_or_none()
 
-        if not db_token:
-            raise InvalidRefreshTokenException()
+        delay_seconds = (
+            auth_settings.LOGIN_COOLDOWN_INITIAL_SECONDS
+            * auth_settings.LOGIN_COOLDOWN_BACKOFF_FACTOR**attempts_over_limit
+        )
 
-        if db_token.is_revoked:
-            raise InvalidRefreshTokenException()
+        cooldown_ends_at = self._normalize_datetime(
+            user.last_failed_login_at
+        ) + timedelta(seconds=delay_seconds)
 
-        if self._normalize_datetime(db_token.expires_at) < datetime.now(UTC):
-            raise InvalidRefreshTokenException()
+        if now >= cooldown_ends_at:
+            return None
 
-        new_access, new_refresh = self._generate_tokens(user_id)
+        seconds_left = math.ceil((cooldown_ends_at - now).total_seconds())
 
-        db_token.token = hash_token(new_refresh)
-        db_token.expires_at = datetime.now(UTC) + timedelta(days=auth_settings.REFRESH_TOKEN_EXPIRE_DAYS)
-        db_token.last_activity = datetime.now(UTC)
+        return LoginCooldownResult(
+            seconds_left=seconds_left,
+        )
 
-        if ip_address:
-            db_token.ip_address = ip_address
-        if user_agent:
-            db_token.user_agent = user_agent
+    async def _handle_invalid_password(
+        self,
+        user: User,
+        now: datetime,
+    ) -> InvalidCredentialsResult:
+        user.failed_login_attempts += 1
+        user.last_failed_login_at = now
+
+        security_alert_email = None
+
+        if (
+            user.failed_login_attempts
+            == auth_settings.LOGIN_ATTEMPTS_BEFORE_SECURITY_ALERT
+        ):
+            security_alert_email = user.email
 
         await self.db.commit()
 
-        return new_access, new_refresh
+        return InvalidCredentialsResult(
+            security_alert_email=security_alert_email,
+        )
 
-    async def logout(self, refresh_token: str):
+    async def _reset_failed_login_attempts(
+        self,
+        user: User,
+    ) -> None:
+        if user.failed_login_attempts == 0:
+            return
+
+        user.failed_login_attempts = 0
+        user.last_failed_login_at = None
+
+        await self.db.commit()
+
+    async def _handle_unrecognized_device(
+        self,
+        user: User,
+        now: datetime,
+        device_code: str | None,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> NewDeviceVerificationRequired | AuthFailure | None:
+        if device_code is None:
+            code = self._generate_6_digit_code()
+
+            user.two_factor_code = get_password_hash(code)
+            user.two_factor_expires_at = now + timedelta(minutes=10)
+
+            await self.db.commit()
+
+            return NewDeviceVerificationRequired(
+                email=user.email,
+                code=code,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+
+        if user.two_factor_code is None or user.two_factor_expires_at is None:
+            return AuthFailure.INVALID_TWO_FACTOR_CODE
+
+        expires_at = self._normalize_datetime(user.two_factor_expires_at)
+
+        if expires_at < now:
+            return AuthFailure.INVALID_TWO_FACTOR_CODE
+
+        if not verify_password(device_code, user.two_factor_code):
+            return AuthFailure.INVALID_TWO_FACTOR_CODE
+
+        user.two_factor_code = None
+        user.two_factor_expires_at = None
+
+        await self.db.commit()
+
+        return None
+
+    async def _is_device_recognized(
+        self, user_id: int, ip_address: str | None, user_agent: str | None
+    ) -> bool:
+        total_sessions = await self.db.execute(
+            select(func.count())
+            .select_from(RefreshToken)
+            .where(RefreshToken.user_id == user_id)
+        )
+        if total_sessions.scalar() == 0:
+            return True
+
+        result = await self.db.execute(
+            select(RefreshToken)
+            .where(
+                RefreshToken.user_id == user_id,
+                RefreshToken.ip_address == ip_address,
+                RefreshToken.user_agent == user_agent,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
+
+    @staticmethod
+    def _generate_6_digit_code() -> str:
+        return f"{secrets.randbelow(1_000_000):06d}"
+
+    async def logout(self, refresh_token: str) -> None:
 
         hashed_token = hash_token(refresh_token)
 
@@ -210,6 +298,78 @@ class AuthService:
             .values(is_revoked=True)
         )
         await self.db.commit()
+
+    # token management methods
+
+    async def refresh_tokens(
+        self,
+        refresh_token: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> TokenRefreshResult:
+        payload = decode_jwt_token(refresh_token)
+
+        if payload is None or payload.get("type") != TOKEN_TYPE_REFRESH:
+            return TokenRefreshFailure.INVALID_REFRESH_TOKEN
+
+        subject = payload.get("sub")
+
+        try:
+            user_id = int(subject)
+        except (TypeError, ValueError):
+            return TokenRefreshFailure.INVALID_REFRESH_TOKEN
+
+        user_result = await self.db.execute(select(User).where(User.id == user_id))
+        user = user_result.scalar_one_or_none()
+
+        if user is None or not user.is_active or not user.is_verified:
+            return TokenRefreshFailure.INVALID_REFRESH_TOKEN
+
+        hashed_token = hash_token(refresh_token)
+
+        token_result = await self.db.execute(
+            select(RefreshToken)
+            .where(RefreshToken.token == hashed_token)
+            .with_for_update()
+        )
+        db_token = token_result.scalar_one_or_none()
+
+        if db_token is None:
+            return TokenRefreshFailure.INVALID_REFRESH_TOKEN
+
+        if db_token.user_id != user_id:
+            return TokenRefreshFailure.INVALID_REFRESH_TOKEN
+
+        if db_token.is_revoked:
+            return TokenRefreshFailure.INVALID_REFRESH_TOKEN
+
+        now = datetime.now(UTC)
+
+        expires_at = self._normalize_datetime(db_token.expires_at)
+
+        if expires_at <= now:
+            return TokenRefreshFailure.INVALID_REFRESH_TOKEN
+
+        new_access_token, new_refresh_token = self._generate_tokens(user_id)
+
+        db_token.token = hash_token(new_refresh_token)
+        db_token.expires_at = now + timedelta(
+            days=auth_settings.REFRESH_TOKEN_EXPIRE_DAYS
+        )
+        db_token.last_activity = now
+
+        if ip_address is not None:
+            db_token.ip_address = ip_address
+
+        if user_agent is not None:
+            db_token.user_agent = user_agent
+
+        await self.db.commit()
+
+        return TokenRefreshSuccess(
+            access_token=new_access_token,
+            refresh_token=new_refresh_token,
+        )
 
     async def cleanup_expired_tokens(self):
         await self.db.execute(
@@ -253,159 +413,39 @@ class AuthService:
         self.db.add(db_refresh_token)
         await self.db.commit()
 
-    async def verify_email(self, token: str):
-        payload = decode_jwt_token(token)
-
-        if not payload or payload.get("type") != TOKEN_TYPE_VERIFY_EMAIL:
-            raise InvalidVerifyTokenException()
-
-        user_id = int(payload.get("sub"))
-
-        result = await self.db.execute(select(User).where(User.id == user_id))
-        user = result.scalar_one_or_none()
-
-        if not user:
-            raise InvalidVerifyTokenException()
-
-        if user.is_verified:
-            return
-
-        user.is_verified = True
-        await self.db.commit()
-
-    def send_verification_email(
-        self, user_email: EmailStr, token: str, background_tasks: BackgroundTasks
-    ):
-        verify_url = f"{auth_settings.BASE_API_URL}/api/v1/auth/verify?token={token}"
-
-        message = MessageSchema(
-            subject="confirmation of registration in BookIt",
-            recipients=[user_email],
-            body=(
-                f"<p>Hello!</p>"
-                f"<p>Thank you for registering with BookIt.</p>"
-                f"<p>Please verify your email by clicking the link below:</p>"
-                f"<a href='{verify_url}'>Verify Email</a>"
-                f"<p>The link will expire in {auth_settings.VERIFY_EMAIL_TOKEN_EXPIRE_MINUTES} minutes.</p>"
-            ),
-            subtype=MessageType.html,
-        )
-
-        background_tasks.add_task(fast_mail.send_message, message)
-
-    def send_security_alert_email(
-        self, user_email: EmailStr, background_tasks: BackgroundTasks
-    ):
-        message = MessageSchema(
-            subject="Security Alert: Multiple Failed Login Attempts",
-            recipients=[user_email],
-            body=(
-                f"<p>Hello!</p>"
-                f"<p>We noticed multiple failed login attempts on your account.</p>"
-                f"<p>If this wasn't you, we recommend changing your password immediately.</p>"
-                f"<p>If you need assistance, please contact our support team.</p>"
-            ),
-            subtype=MessageType.html,
-        )
-
-        background_tasks.add_task(fast_mail.send_message, message)
+    # session management methods
 
     async def get_active_sessions(self, user_id: int):
         result = await self.db.execute(
             select(RefreshToken).where(
                 RefreshToken.user_id == user_id,
-                RefreshToken.is_revoked == False,
+                RefreshToken.is_revoked.is_(False),
                 RefreshToken.expires_at > datetime.now(UTC),
             )
         )
         return result.scalars().all()
 
-    async def revoke_other_sessions(self, user_id: int, current_refresh_token: str):
+    async def revoke_other_sessions(
+        self, user_id: int, current_refresh_token: str
+    ) -> None:
         hashed_token = hash_token(current_refresh_token)
 
         await self.db.execute(
             update(RefreshToken)
             .where(
                 RefreshToken.user_id == user_id,
-                RefreshToken.is_revoked == False,
+                RefreshToken.is_revoked.is_(False),
                 RefreshToken.token != hashed_token,
             )
             .values(is_revoked=True)
         )
         await self.db.commit()
 
-    def _generate_6_digit_code(self) -> str:
-        return "".join(random.choices(string.digits, k=6))
+    # password reset methods
 
-    async def _is_device_recognized(
-        self, user_id: int, ip_address: str | None, user_agent: str | None
-    ) -> bool:
-        total_sessions = await self.db.execute(
-            select(func.count())
-            .select_from(RefreshToken)
-            .where(RefreshToken.user_id == user_id)
-        )
-        if total_sessions.scalar() == 0:
-            return True
-
-        result = await self.db.execute(
-            select(RefreshToken)
-            .where(
-                RefreshToken.user_id == user_id,
-                RefreshToken.ip_address == ip_address,
-                RefreshToken.user_agent == user_agent,
-            )
-            .limit(1)
-        )
-        return result.scalar_one_or_none() is not None
-
-    def send_new_device_email(
-        self,
-        user_email: str,
-        code: str,
-        ip: str | None,
-        ua: str | None,
-    ):
-        try:
-            message = MessageSchema(
-                subject="BookIt: Login from a new device",
-                recipients=[user_email],
-                body=(
-                    f"<h3>New device detected</h3>"
-                    f"<p>We noticed a login attempt from a new device.</p>"
-                    f"<ul><li>IP: {ip}</li><li>Browser/OS: {ua}</li></ul>"
-                    f"<p>Your verification code is: <b style='font-size: 20px;'>{code}</b></p>"
-                    f"<p>Valid for 10 minutes. Do not share it with anyone.</p>"
-                ),
-                subtype=MessageType.html,
-            )
-            asyncio.create_task(fast_mail.send_message(message))
-        except ValidationError as e:
-            logger.error(f"Pydantic email error: {e}")
-
-    def send_password_reset_email(self, user_email: str, token: str, background_tasks: BackgroundTasks):
-        reset_url = (
-            f"{auth_settings.BASE_API_URL}/api/v1/auth/reset-password?token={token}"
-        )
-
-        try:
-            message = MessageSchema(
-                subject="BookIt: Password Reset Request",
-                recipients=[user_email],
-                body=(
-                    f"<h3>Password Reset</h3>"
-                    f"<p>You requested to reset your password.</p>"
-                    f"<p>Click the link below to set a new password:</p>"
-                    f"<a href='{reset_url}'>Reset Password</a>"
-                    f"<p>If you didn't request this, just ignore this email. The link expires in 15 minutes.</p>"
-                ),
-                subtype=MessageType.html,
-            )
-            background_tasks.add_task(fast_mail.send_message, message)
-        except ValidationError as e:
-            logger.error(f"Pydantic email error in reset password: {e}")
-
-    async def request_password_reset(self, email: str, background_tasks: BackgroundTasks):
+    async def request_password_reset(
+        self, email: str, background_tasks: BackgroundTasks
+    ) -> None:
         result = await self.db.execute(select(User).where(User.email == email))
         user = result.scalar_one_or_none()
 
@@ -418,9 +458,14 @@ class AuthService:
             expires_delta=timedelta(minutes=15),
         )
 
-        self.send_password_reset_email(user.email, reset_token, background_tasks)
+        self.email_service.send_password_reset_email(
+            mail_to=user.email,
+            token=reset_token,
+            base_url=auth_settings.FRONTEND_URL,
+            bg_tasks=background_tasks,
+        )
 
-    async def reset_password(self, payload_data: ResetPasswordRequest):
+    async def reset_password(self, payload_data: ResetPasswordRequest) -> None:
         payload = decode_jwt_token(payload_data.token)
 
         if not payload or payload.get("type") != TOKEN_TYPE_RESET_PASSWORD:
@@ -441,4 +486,26 @@ class AuthService:
             .values(is_revoked=True)
         )
 
+        await self.db.commit()
+
+    # email verification methods
+
+    async def verify_email(self, token: str):
+        payload = decode_jwt_token(token)
+
+        if not payload or payload.get("type") != TOKEN_TYPE_VERIFY_EMAIL:
+            raise InvalidVerifyTokenException()
+
+        user_id = int(payload.get("sub"))
+
+        result = await self.db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+
+        if not user:
+            raise InvalidVerifyTokenException()
+
+        if user.is_verified:
+            return
+
+        user.is_verified = True
         await self.db.commit()

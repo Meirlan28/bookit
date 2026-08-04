@@ -1,5 +1,6 @@
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.bookit.rooms.bookings.exceptions import (
     BookingConflictException,
@@ -15,6 +16,15 @@ from src.bookit.rooms.models import Room
 class BookingService:
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    async def get_user_bookings(self, user_id: int) -> list[Booking]:
+        result = await self.db.execute(
+            select(Booking)
+            .where(Booking.user_id == user_id)
+            .order_by(Booking.start_time.desc())
+            .options(selectinload(Booking.room))
+        )
+        return result.scalars().all()
 
     async def create_booking(
         self, room_id: int, user_id: int, booking_in: BookingCreate

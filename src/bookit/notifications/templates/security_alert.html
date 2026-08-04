@@ -1,0 +1,15 @@
+<!-- src/bookit/notifications/templates/security_alert.html -->
+{% extends "base.html" %}
+
+{% block content %}
+    <h3 style="color: #d9534f;">Security Alert: Multiple Failed Login Attempts</h3>
+    <p>We noticed multiple failed attempts to log into your account.</p>
+
+    <p>For your security, further login attempts have been temporarily suspended.</p>
+
+    <p><strong>If this wasn't you</strong>, someone might be trying to access your account. We strongly recommend resetting your password immediately.</p>
+
+    <p><strong>If this was you</strong>, please wait a few minutes before trying again, or reset your password if you have forgotten it.</p>
+
+    <p>If you need assistance, please contact our support team.</p>
+{% endblock %}

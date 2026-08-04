@@ -10,24 +10,33 @@ from fastapi import (
     Response,
     status,
 )
-from pydantic_core import ValidationError
+from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
+from bookit.auth.presenters import present_auth_result
 from src.bookit.auth.config import auth_settings
-from src.bookit.auth.constants import REFRESH_COOKIE_NAME, TOKEN_TYPE_BEARER
+from src.bookit.auth.constants import REFRESH_COOKIE_NAME
 from src.bookit.auth.dependencies import (
     AuthServiceDep,
+    EmailServiceDep,
     OAuth2PasswordRequestFormDep,
     get_current_user,
 )
 from src.bookit.auth.exceptions import (
-    InvalidCredentialsException,
     InvalidRefreshTokenException,
 )
 from src.bookit.auth.models import User
+from src.bookit.auth.presenters import present_token_refresh_result
 from src.bookit.auth.schemas import (
+    AuthSuccess,
     ForgotPasswordRequest,
+    InvalidCredentialsResult,
+    RegistrationFailure,
+    RegistrationResponse,
+    RegistrationSuccess,
     ResetPasswordRequest,
     SessionResponse,
+    TokenRefreshSuccess,
     TokenResponse,
     UserCreate,
     UserLogin,
@@ -48,7 +57,9 @@ async def get_me(
 
 
 @router.post(
-    "/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED
+    "/register",
+    response_model=RegistrationResponse,
+    status_code=status.HTTP_201_CREATED,
 )
 @limiter.limit("3/hour")
 async def register(
@@ -56,12 +67,43 @@ async def register(
     request: Request,
     user_data: UserCreate,
     bg_tasks: BackgroundTasks,
+    email_service: EmailServiceDep,
 ):
-    user, verify_token = await auth_service.register_new_user(user_data)
+    result = await auth_service.register_new_user(user_data)
 
-    auth_service.send_verification_email(user.email, verify_token, bg_tasks)
+    match result:
+        case RegistrationFailure.USER_ALREADY_EXISTS:
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT,
+                content={
+                    "detail": "User with this email already exists",
+                    "code": "user_already_exists",
+                },
+            )
 
-    return user
+        case RegistrationSuccess(
+            user_id=user_id,
+            email=email,
+            verification_token=verification_token,
+        ):
+            email_service.send_verification_email(
+                mail_to=email,
+                token=verification_token,
+                base_url=auth_settings.FRONTEND_URL,
+                bg_tasks=bg_tasks,
+            )
+
+            return JSONResponse(
+                status_code=status.HTTP_201_CREATED,
+                content={
+                    "id": user_id,
+                    "email": str(email),
+                    "detail": "User registered successfully",
+                },
+            )
+
+        case _:
+            raise RuntimeError(f"Unhandled registration result: {result!r}")
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -71,33 +113,44 @@ async def login(
     request: Request,
     response: Response,
     form_data: OAuth2PasswordRequestFormDep,
-    background_tasks: BackgroundTasks,
+    bg_tasks: BackgroundTasks,
+    email_service: EmailServiceDep,
     x_device_code: str | None = Header(default=None),
 ):
     try:
         user_data = UserLogin(email=form_data.username, password=form_data.password)
     except ValidationError:
-        raise InvalidCredentialsException()
+        return present_auth_result(
+            result=InvalidCredentialsResult(),
+            background_tasks=bg_tasks,
+            email_service=email_service,
+        )
 
     ip_address = request.client.host if request.client else None
     user_agent = request.headers.get("user-agent")
 
-    access_token, refresh_token = await auth_service.authenticate_user(
-        user_data, background_tasks, ip_address, user_agent, x_device_code
+    result = await auth_service.authenticate_user(
+        user_in=user_data,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        device_code=x_device_code,
     )
 
-    background_tasks.add_task(auth_service.cleanup_expired_tokens)
+    if isinstance(result, AuthSuccess):
+        response.set_cookie(
+            key=REFRESH_COOKIE_NAME,
+            value=result.refresh_token,
+            httponly=True,
+            secure=auth_settings.REFRESH_COOKIE_SECURE,
+            samesite="strict",
+            max_age=auth_settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+        )
 
-    response.set_cookie(
-        key=REFRESH_COOKIE_NAME,
-        value=refresh_token,
-        httponly=True,
-        secure=auth_settings.REFRESH_COOKIE_SECURE,
-        samesite="strict",
-        max_age=auth_settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+    return present_auth_result(
+        result=result,
+        background_tasks=bg_tasks,
+        email_service=email_service,
     )
-
-    return TokenResponse(access_token=access_token, token_type=TOKEN_TYPE_BEARER)
 
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -108,21 +161,27 @@ async def refresh_token(
     response: Response,
     refresh_token: str | None = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
 ):
-    if not refresh_token:
-        raise InvalidRefreshTokenException()
 
-    new_access, new_refresh = await auth_service.refresh_tokens(refresh_token)
+    ip_address = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
 
-    response.set_cookie(
-        key=REFRESH_COOKIE_NAME,
-        value=new_refresh,
-        httponly=True,
-        secure=auth_settings.REFRESH_COOKIE_SECURE,
-        samesite="strict",
-        max_age=auth_settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+    result = await auth_service.refresh_tokens(
+        refresh_token, ip_address=ip_address, user_agent=user_agent
     )
 
-    return TokenResponse(access_token=new_access, token_type=TOKEN_TYPE_BEARER)
+    if isinstance(result, TokenRefreshSuccess):
+        new_refresh = result.refresh_token
+
+        response.set_cookie(
+            key=REFRESH_COOKIE_NAME,
+            value=new_refresh,
+            httponly=True,
+            secure=auth_settings.REFRESH_COOKIE_SECURE,
+            samesite="strict",
+            max_age=auth_settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+        )
+
+    return present_token_refresh_result(result)
 
 
 @router.post("/logout", status_code=status.HTTP_200_OK)
@@ -135,13 +194,11 @@ async def logout(
 ):
     if refresh_token:
         await auth_service.logout(refresh_token)
-
     response.delete_cookie(
         key=REFRESH_COOKIE_NAME,
         httponly=True,
-        secure=auth_settings.SECURE_COOKIES,
-        samesite="lax",
-        path="/",
+        secure=auth_settings.REFRESH_COOKIE_SECURE,
+        samesite="strict",
     )
 
     return {"message": "Вы успешно вышли из системы"}
@@ -206,4 +263,6 @@ async def reset_password(
     auth_service: AuthServiceDep,
 ):
     await auth_service.reset_password(body)
-    return {"message": "The password has been successfully reset. You can now log in with your new password."}
+    return {
+        "message": "The password has been successfully reset. You can now log in with your new password."
+    }

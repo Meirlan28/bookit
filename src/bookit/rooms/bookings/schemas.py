@@ -18,10 +18,12 @@ class BookingCreate(BaseModel):
         return self
 
 
-class BookingResponse(BookingCreate):
+class BookingResponse(BaseModel):
     id: int
     user_id: int
     room_id: int
+    start_time: AwareDatetime
+    end_time: AwareDatetime
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)

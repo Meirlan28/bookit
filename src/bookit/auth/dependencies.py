@@ -5,6 +5,8 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bookit.notifications.email import fast_mail
+from bookit.notifications.service import EmailService
 from src.bookit.auth.constants import TOKEN_TYPE_ACCESS
 from src.bookit.auth.exceptions import InvalidTokenException
 from src.bookit.auth.models import Role, User
@@ -32,7 +34,6 @@ async def get_current_user(
 
     if not user or not user.is_active:
         raise InvalidTokenException()
-
     if not user.is_verified:
         raise InvalidTokenException()
 
@@ -53,12 +54,19 @@ async def get_current_admin(
     return current_user
 
 
+def get_email_service() -> EmailService:
+    return EmailService(fast_mail)
+
+
 async def get_auth_service(
     db: Annotated[AsyncSession, Depends(get_async_session)],
+    email_service: Annotated[EmailService, Depends(get_email_service)],
 ) -> AuthService:
-    return AuthService(db)
+    return AuthService(db, email_service)
 
 
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 
 OAuth2PasswordRequestFormDep = Annotated[OAuth2PasswordRequestForm, Depends()]
+
+EmailServiceDep = Annotated[EmailService, Depends(get_email_service)]

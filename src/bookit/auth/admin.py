@@ -21,6 +21,8 @@ class AdminAuth(AuthenticationBackend):
                 user
                 and verify_password(password, user.hashed_password)
                 and user.role == Role.ADMIN
+                and user.is_active
+                and user.is_verified
             ):
                 request.session.update({"token": str(user.id)})
                 return True
@@ -39,7 +41,12 @@ class AdminAuth(AuthenticationBackend):
         async with async_session_maker() as db:
             result = await db.execute(select(User).where(User.id == int(token)))
             user = result.scalar_one_or_none()
-            if not user or user.role != Role.ADMIN:
+            if (
+                not user
+                or user.role != Role.ADMIN
+                or not user.is_active
+                or not user.is_verified
+            ):
                 return False
 
         return True

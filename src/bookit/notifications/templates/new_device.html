@@ -1,0 +1,20 @@
+<!-- src/bookit/notifications/templates/new_device.html -->
+{% extends "base.html" %}
+
+{% block content %}
+    <h3 style="color: #d9534f;">New Device Detected</h3>
+    <p>We noticed a login attempt to your BookIt account from an unrecognized device.</p>
+
+    <ul style="background: #f9f9f9; padding: 15px 30px; border-radius: 4px;">
+        <li><strong>IP Address:</strong> {{ ip }}</li>
+        <li><strong>Browser/OS:</strong> {{ ua }}</li>
+    </ul>
+
+    <p>To complete your login, please enter the following verification code:</p>
+
+    <div style="text-align: center; margin: 25px 0;">
+        <span class="highlight">{{ code }}</span>
+    </div>
+
+    <p>This code is valid for 10 minutes. <strong>Do not share it with anyone.</strong></p>
+{% endblock %}

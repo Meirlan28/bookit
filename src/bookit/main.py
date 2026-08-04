@@ -5,6 +5,7 @@ from slowapi.errors import RateLimitExceeded
 from sqladmin import Admin
 from starlette.middleware.sessions import SessionMiddleware
 
+from src.bookit.admin.router import router as admin_router
 from src.bookit.auth.admin import AdminAuth, UserAdmin
 from src.bookit.auth.config import auth_settings
 from src.bookit.auth.router import router as auth_router
@@ -45,6 +46,7 @@ def create_app() -> FastAPI:
 
     register_exception_handlers(app)
 
+    app.include_router(admin_router, prefix="/api/v1")
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(rooms_router, prefix="/api/v1")
     app.include_router(bookings_router, prefix="/api/v1")
@@ -56,6 +58,7 @@ def create_app() -> FastAPI:
         engine=engine,
         authentication_backend=authentication_backend,
         title="BookIt Admin Panel",
+        base_url="/internal/admin",
     )
 
     admin.add_view(UserAdmin)
